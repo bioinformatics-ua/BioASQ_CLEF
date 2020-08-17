@@ -5,7 +5,7 @@ ZIP_FILE=download_folder.zip
 if [ -f "$ZIP_FILE" ]; then
     echo "Starting the unziping $ZIP_FILE"
     
-    tar -xvzf $ZIP_FILE
+    unzip $ZIP_FILE
     
 else 
     echo "[ERROR]: Please download the $ZIP_FILE and rerun this script"
@@ -15,7 +15,7 @@ else
 fi
 
 echo "Install python the requirements"
-python install requirements.txt
+#python install requirements.txt
 
 echo "Manually Install mmnrm python library"
 cd _other_dependencies/mmnrm/

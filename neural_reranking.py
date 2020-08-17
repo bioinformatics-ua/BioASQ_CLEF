@@ -1,7 +1,6 @@
 import argparse
 import json
 from nir.utils import create_filter_query_function, change_bm25_parameters
-from elasticsearch import Elasticsearch, helpers
 from mmnrm.utils import set_random_seed, load_model_weights, load_model
 from mmnrm.training import TrainCollection, TestCollection
 from mmnrm.dataset import TrainCollectionV2, TestCollectionV2, sentence_splitter_builderV2
@@ -12,8 +11,12 @@ from collections import defaultdict
 import tensorflow as tf
 from tensorflow.keras import backend as K
 
+print("Tensorflow version: ",tf.__version__)
+
+
 import math
 import os
+import sys
 import pickle
 import numpy as np
 import time
@@ -63,6 +66,39 @@ def load_neural_model(path_to_weights):
                                                                                       max_sentence_size=max_input_sentence,
                                                                                       mode=4)
     
+    def test_input_generator(data_generator):
+
+        data_generator = test_sentence_generator(data_generator)
+
+        for _id, query, docs in data_generator:
+
+            #tokenization
+            query_idf = list(map(lambda x: idf_from_id_token(x), query))
+
+            tokenized_docs = []
+            ids_docs = []
+            offsets_docs = []
+
+            for doc in docs:
+
+                padded_doc = pad_docs(doc["text"], max_lim=max_input_query)
+                for q in range(len(padded_doc)):
+                    padded_doc[q] = pad_docs(padded_doc[q], max_lim=max_sentences_per_query)
+                    padded_doc[q] = pad_sentences(padded_doc[q])
+                tokenized_docs.append(padded_doc)
+                ids_docs.append(doc["id"])
+                offsets_docs.append(doc["offset"])
+
+            # padding
+            query = pad_query([query])[0]
+            query = [query] * len(tokenized_docs)
+            query_idf = pad_query([query_idf], dtype="float32")[0]
+            query_idf = [query_idf] * len(tokenized_docs)
+
+            yield _id, [np.array(query), np.array(tokenized_docs), np.array(query_idf)], ids_docs, offsets_docs
+
+    return rank_model, test_input_generator
+
 def rerank(model, t_collection):
     
     generator_Y = t_collection.generator()
@@ -145,6 +181,16 @@ def get_snippets(query_data, threashold):
     
     return final_snippets[:10]
 
+def organize_snippets(offsets, answer_shape):
+    queries = [[] for _ in range(answer_shape[0])]
+
+    for offset in offsets:
+        for q_ids in offset[-1]:
+            if len(queries[q_ids])<5:
+                queries[q_ids].append((offset[0], offset[1], offset[2]))
+
+    return queries
+
 def snippet_retrieval(query_scores, threashold):
     
     answers = []
@@ -188,14 +234,12 @@ if __name__ == "__main__":
     parser.add_argument('model_weight_path', type=str)
     parser.add_argument('test_set', type=str)
     parser.add_argument('candidate_set', type=str)
-    parser.add_argument('-threashold', dest='s_threashold', default=0.1)
+    parser.add_argument('-threashold', dest='threashold', default=0.1)
 
 
     args = parser.parse_args()
     
-    threashold = 0.1
-    
-    evaluate = args.evaluate
+    threashold = 0.1    
     
     # load queries
     with open(args.test_set, "r", encoding="utf-8") as f:
@@ -206,17 +250,17 @@ if __name__ == "__main__":
     
     # load candidates set
     with open(args.candidate_set, "r", encoding="utf-8") as f:
-        queries = json.load(f)
+        candidate_set = json.load(f)
         
     # validation, since candidate_set must have all the queries from test_set
-    if not all([x["id"] in candidate_set for x in test_set]):
+    if not all([x["id"] in candidate_set for x in queries]):
         print("test set and candidate set has unmatchable ids")
-        return 1
+        sys.exit(1)
     
     # build collection dataset for the neural model
     # create the test set
     query_list = list(map(lambda x:{"id":x["id"], "query":x["body"]}, queries))
-    t_test_collection = TestCollectionV2(query_list, results).batch_size(100)
+    test_collection = TestCollectionV2(query_list, candidate_set).batch_size(100)
     
     # load the model
     rank_model, test_input_generator = load_neural_model(args.model_weight_path)
@@ -225,7 +269,7 @@ if __name__ == "__main__":
     test_collection.set_transform_inputs_fn(test_input_generator)
     
     # perform the neural rerank
-    query_scores = rerank(model, test_collection)
+    query_scores = rerank(rank_model, test_collection)
     
     # run snippet retrieval algorithm
     answers = snippet_retrieval(query_scores, args.threashold)
@@ -241,7 +285,7 @@ if __name__ == "__main__":
             bioasq_results = subprocess.Popen(
                 ['java',
                  '-Xmx10G',
-                 '-cp', '$CLASSPATH:./BioASQEvaluation.jar',
+                 '-cp', '$CLASSPATH:./download_folder/BioASQEvaluation/BioASQEvaluation.jar',
                  'evaluation.EvaluatorTask1b', 
                  '-phaseA', 
                  '-e', "8",
